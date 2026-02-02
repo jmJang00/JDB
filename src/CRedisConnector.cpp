@@ -28,7 +28,7 @@ bool CRedisConnector::Connect()
 
 	_lastError = ERedisError::NONE;
 
-	_context = redisConnectWithTimeout(_config.host.c_str(), _config.port, _timeout);
+	_context = redisConnect(_config.host.c_str(), _config.port);
 
 	if (_context == nullptr || _context->err != 0)
 	{
@@ -98,7 +98,7 @@ ERedisError CRedisConnector::GetLastError()
 
 bool CRedisConnector::Set(const std::string& key, const std::string& value)
 {
-	ReplyPtr replyPtr = Execute("SET %s %s EX 10", key.c_str(), value.c_str());
+	ReplyPtr replyPtr = Execute("SET %s %s EX 20", key.c_str(), value.c_str());
 
 	if (replyPtr && replyPtr->type == REDIS_REPLY_STATUS && strcmp(replyPtr->str, "OK") == 0)
 	{
