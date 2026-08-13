@@ -21,7 +21,7 @@ void JDBInit::Initialize()
 		if (_init == 0)
 		{
 			JCoreInit::Initialize();
-			mysql_library_init(0, nullptr, nullptr);
+			CDBConnector::Initialize();
 
 			InterlockedExchange(&_init, 1);
 		}
@@ -41,7 +41,7 @@ void JDBInit::Release()
 
 		if (_init == 1)
 		{
-			mysql_library_end();
+			CDBConnector::Release();
 
 			InterlockedExchange(&_init, 0);
 		}

@@ -1,16 +1,24 @@
 #pragma once
+#include <set>
 #include <JCore/JWindows.h>
+#include <JCore/ScopedLock.h>
 #include <JCore/CThread.h>
 #include "CRedisConnector.h"
 
 class CTlsRedisConnector
 {
 public:
-	CTlsRedisConnector(const FRedisConfig& config, int timeoutSec = 5);
+	CTlsRedisConnector(const FRedisConfig& config);
 
 	~CTlsRedisConnector();
 
+	void Enable();
+
+	void DisableAll();
+
 	bool Connect();
+
+	void Reconnect();
 
 	void Disconnect();
 
@@ -20,13 +28,15 @@ public:
 
 	std::string Get(const std::string& key);
 
+	bool Delete(const std::string& key);
+
 	ERedisError GetLastError();
 
 private:
-
 	CRedisConnector* Init();
 
+	CRWLock _lock;
+	std::set<CRedisConnector*> _container;
 	unsigned int _index;
 	FRedisConfig _config;
-	int _timeoutSec;
 };

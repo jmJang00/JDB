@@ -10,47 +10,32 @@
 #include <JCore/JWindows.h>
 #include <JCore/CBucketPool.h>
 #include <JCore/CLockFreeQueue.h>
+#include <JCore/IWorkerObserver.h>
 #include <JDB/CDBConnector.h>
+#include <JDB/IDBTask.h>
 
-struct IDBTask
-{
-	virtual ~IDBTask() = default;
+class CDBQueue;
 
-	virtual void Execute(CDBConnector* _conn) = 0;
-};
-
-class CDBAgent
+class IDBWorker
 {
 public:
-	CDBAgent();
+	virtual bool PostStatus(uintptr_t compKey) = 0;
+};
+
+class CDBAgent : public IDBWorker
+{
+public:
+	CDBAgent(const FDBConfig& config);
 	~CDBAgent();
 
-	bool Initialize(int readThreadCount, const FDBConfig& config);
+	bool Initialize(int numChannel, int numThread, int queueSize, const std::vector<IWorkerObserver*>& observers);
 	void Release();
 
 public:
-	void PushReadTask(IDBTask* task);
-	void PushWriteTask(IDBTask* task);
-	void RequestWriteSync(IDBTask* task);
-	void RequestReadSync(IDBTask* task);
-
-	template <typename T, typename... Args>
-	static T* CreateTask(Args&&... args)
-	{
-		void* memory = gBucketPool.get()->Alloc(sizeof(T));
-		if (!memory)
-		{
-			return nullptr;
-		}
-		return new (memory) T(std::forward<Args>(args)...);
-	}
-
-	static void FreeTask(IDBTask* task)
-	{
-		if (!task) return;
-		task->~IDBTask();
-		gBucketPool.get()->Free(task);
-	}
+	int GetUseSize(int channel);
+	bool PostStatus(uintptr_t compKey) override;
+	void PushTask(int channel, IDBTask* task);
+	void PushTaskSync(int channel, IDBTask* task);
 
 private:
 	struct SyncTaskWrapper : public IDBTask
@@ -61,6 +46,11 @@ private:
 		SyncTaskWrapper(IDBTask* task, std::shared_ptr<std::promise<void>> p)
 			: _origin(task), _promise(p)
 		{
+		}
+
+		void Destroy() override
+		{
+			this->~SyncTaskWrapper();
 		}
 
 		void Execute(CDBConnector* _conn) override
@@ -74,17 +64,15 @@ private:
 		}
 	};
 
-	void ReadWorkerThread();
-	void WriteWorkerThread();
+	void DBWorkerThread(CDBConnector* connector);
 
 private:
 	HANDLE _readIocp = NULL;
-	HANDLE _writeShutdownEvent = NULL;
-	HANDLE _writeEvent = NULL;
-
-	CLockFreeQueue<IDBTask*> _writeQueue;
-	std::vector<CThread*> _readThreads;
-	CThread* _writeThread = nullptr;
+	std::vector<CThread*> _threads;
+	std::vector<CDBConnector*> _connectors;
+	std::vector<CDBQueue*> _dbQueues;
+	std::vector<IWorkerObserver*> _observers;
+	int32_t _numChannel = 0;
 
 	FDBConfig _dbConfig;
 	bool _isRunning = false;

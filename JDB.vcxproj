@@ -70,6 +70,12 @@
     <Import Project="$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props" Condition="exists('$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props')" Label="LocalAppDataPlatform" />
   </ImportGroup>
   <PropertyGroup Label="UserMacros" />
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">
+    <OutDir>$(ProjectDir)..\$(Platform)\$(Configuration)\</OutDir>
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
+    <OutDir>$(ProjectDir)..\$(Platform)\$(Configuration)\</OutDir>
+  </PropertyGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">
     <ClCompile>
       <WarningLevel>Level3</WarningLevel>
@@ -111,7 +117,7 @@
       <PrecompiledHeader>Use</PrecompiledHeader>
       <PrecompiledHeaderFile>pch.h</PrecompiledHeaderFile>
       <LanguageStandard>stdcpp17</LanguageStandard>
-      <AdditionalIncludeDirectories>$(ProjectDir)\;$(ProjectDir)\include;$(ProjectDir)..\JCore\include\;$(ProjectDir)..\External\include\</AdditionalIncludeDirectories>
+      <AdditionalIncludeDirectories>$(ProjectDir)\include;$(ProjectDir)..\JCore\include\;$(ProjectDir)..\External\include\</AdditionalIncludeDirectories>
     </ClCompile>
     <Link>
       <SubSystem>
@@ -131,7 +137,7 @@
       <PrecompiledHeaderFile>pch.h</PrecompiledHeaderFile>
       <Optimization>Disabled</Optimization>
       <LanguageStandard>stdcpp17</LanguageStandard>
-      <AdditionalIncludeDirectories>$(ProjectDir)\;$(ProjectDir)\include;$(ProjectDir)..\JCore\include\;$(ProjectDir)..\External\include\</AdditionalIncludeDirectories>
+      <AdditionalIncludeDirectories>$(ProjectDir)\include;$(ProjectDir)..\JCore\include\;$(ProjectDir)..\External\include\</AdditionalIncludeDirectories>
     </ClCompile>
     <Link>
       <SubSystem>
@@ -142,16 +148,19 @@
   <ItemGroup>
     <ClInclude Include="include\JDB\CDBAgent.h" />
     <ClInclude Include="include\JDB\CDBConnector.h" />
+    <ClInclude Include="include\JDB\CDBQueue.h" />
     <ClInclude Include="include\JDB\CRedisConnector.h" />
     <ClInclude Include="include\JDB\CTlsDBConnector.h" />
     <ClInclude Include="include\JDB\CTlsRedisConnector.h" />
+    <ClInclude Include="include\JDB\IDBTask.h" />
     <ClInclude Include="include\JDB\Initialize.h" />
-    <ClInclude Include="pch.h" />
+    <ClInclude Include="src\pch.h" />
     <ClInclude Include="src\LogTag.h" />
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="src\CDBAgent.cpp" />
     <ClCompile Include="src\CDBConnector.cpp" />
+    <ClCompile Include="src\CDBQueue.cpp" />
     <ClCompile Include="src\CTlsDBConnector.cpp" />
     <ClCompile Include="src\CTlsRedisConnector.cpp" />
     <ClCompile Include="src\Initialize.cpp" />
@@ -163,11 +172,6 @@
       <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='Release|Win32'">Create</PrecompiledHeader>
       <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='Release|x64'">Create</PrecompiledHeader>
     </ClCompile>
-  </ItemGroup>
-  <ItemGroup>
-    <ProjectReference Include="..\JCore\JCore.vcxproj">
-      <Project>{77781332-086b-4a79-9b53-7c7570923dd9}</Project>
-    </ProjectReference>
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <ImportGroup Label="ExtensionTargets">

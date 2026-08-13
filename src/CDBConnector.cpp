@@ -2,6 +2,9 @@
 #include <JCore/SLog.h>
 #include <JDB/CDBConnector.h>
 #include "LogTag.h"
+#include <mysql/mysql.h>
+#pragma comment(lib, "libmysql.lib")
+
 
 CResultSet::CResultSet(MYSQL_RES* res)
 {
@@ -29,9 +32,10 @@ CResultSet::CResultSet(MYSQL_RES* res)
 		{
 			rowData.push_back(row[i] ? row[i] : "");
 		}
-		data.push_back(rowData);
+		data.push_back(std::move(rowData));
 	}
 	mysql_free_result(res);
+	Next();
 }
 
 CResultSet::CResultSet(CResultSet&& other) noexcept
@@ -39,7 +43,6 @@ CResultSet::CResultSet(CResultSet&& other) noexcept
 	, data(std::move(other.data))
 	, currentRow(other.currentRow)
 {
-	other.currentRow = -1;
 }
 
 CResultSet& CResultSet::operator=(CResultSet&& other) noexcept
@@ -53,6 +56,16 @@ CResultSet& CResultSet::operator=(CResultSet&& other) noexcept
 	return *this;
 }
 
+void CDBConnector::Initialize()
+{
+	mysql_library_init(0, nullptr, nullptr);
+}
+
+void CDBConnector::Release()
+{
+	mysql_library_end();
+}
+
 CDBConnector::CDBConnector(const FDBConfig& config)
 	: _conn(nullptr) 
 {
@@ -62,7 +75,7 @@ CDBConnector::CDBConnector(const FDBConfig& config)
 
 CDBConnector::~CDBConnector()
 { 
-	if (_conn && inTransaction)
+	if (_conn && _inTransaction)
 	{
 		Rollback();
 	}
@@ -70,11 +83,59 @@ CDBConnector::~CDBConnector()
 	mysql_thread_end();
 }
 
+void CDBConnector::Enable()
+{
+	_isRunning = true;
+}
+
+void CDBConnector::Disable()
+{
+	_isRunning = false;
+}
+
+int CDBConnector::GetMySqlError() const
+{
+	return mysql_errno(_conn);
+}
+
 bool CDBConnector::Connect()
 {
-	inTransaction = false;
+	_inTransaction = false;
 
-	return RawConnect();
+	if (_conn)
+	{
+		mysql_close(_conn);
+	}
+
+	_conn = mysql_init(NULL);
+
+	if (!mysql_real_connect(_conn, _config.host.c_str(), _config.user.c_str(), 
+			_config.pw.c_str(), _config.db.c_str(), _config.port, NULL, 0))
+	{
+		_lastError = EDBError::CONNECTION_FAILED;
+		HandleMySQLError(mysql_errno(_conn));
+		return false;
+	}
+
+	mysql_set_character_set(_conn, "utf8mb4");
+
+	_lastError = EDBError::NONE;
+
+	return true;
+}
+
+void CDBConnector::Reconnect()
+{
+	int waitTime = 50;
+	while (_isRunning && !Connect())
+	{
+		Sleep(waitTime);
+
+		if (waitTime < 8000)
+		{
+			waitTime *= 2;
+		}
+	}
 }
 
 void CDBConnector::Disconnect()
@@ -88,15 +149,15 @@ void CDBConnector::Disconnect()
 
 bool CDBConnector::BeginTransaction()
 {
-	if (inTransaction)
+	if (_inTransaction)
 	{
-		lastError = EDBError::TRANSACTION_ALREADY_STARTED;
+		_lastError = EDBError::TRANSACTION_ALREADY_STARTED;
 		return false;
 	}
 
-	if (ExecuteRaw("START TRANSACTION"))
+	if (Execute("START TRANSACTION"))
 	{
-		inTransaction = true;
+		_inTransaction = true;
 		return true;
 	}
 
@@ -105,15 +166,15 @@ bool CDBConnector::BeginTransaction()
 
 bool CDBConnector::Commit()
 {
-	if (!inTransaction)
+	if (!_inTransaction)
 	{
-		lastError = EDBError::TRANSACTION_NOT_STARTED;
+		_lastError = EDBError::TRANSACTION_NOT_STARTED;
 		return false;
 	}
 
-	if (ExecuteRaw("COMMIT"))
+	if (Execute("COMMIT"))
 	{
-		inTransaction = false;
+		_inTransaction = false;
 		return true;
 	}
 
@@ -122,15 +183,15 @@ bool CDBConnector::Commit()
 
 bool CDBConnector::Rollback()
 {
-	if (!inTransaction)
+	if (!_inTransaction)
 	{
-		lastError = EDBError::TRANSACTION_NOT_STARTED;
+		_lastError = EDBError::TRANSACTION_NOT_STARTED;
 		return false;
 	}
 
-	if (ExecuteRaw("ROLLBACK"))
+	if (Execute("ROLLBACK"))
 	{
-		inTransaction = false;
+		_inTransaction = false;
 		return true;
 	}
 
@@ -217,64 +278,47 @@ bool CDBConnector::IsConnected()
 	}
 }
 
-std::string CDBConnector::Escape(const wchar_t* wvalue)
+std::string CDBConnector::Escape(std::wstring_view wvalue)
 {
-	if (!_conn || !wvalue)
+	if (!_conn || wvalue.empty())
 	{
 		return "";
 	}
 	
-	char utf8Raw[MAX_QUERY_LEN];
-	int utf8Len = WStringToUTF8(wvalue, utf8Raw, sizeof(utf8Raw));
-	if (utf8Len == 0)
+	std::string utf8str = StringUtil::WStringToString(wvalue);
+	if (utf8str.empty())
 	{
 		return "";
 	}
 
-	std::vector<char> escapeBuffer(utf8Len * 2 + 1);
-	mysql_real_escape_string(_conn, escapeBuffer.data(), utf8Raw, utf8Len);
+	_escapeBuffer.resize(utf8str.size() * 2 + 1);
+	unsigned long len = mysql_real_escape_string(_conn, _escapeBuffer.data(), utf8str.data(), utf8str.size());
 
-	return std::string(escapeBuffer.data());
-}
-
-std::string CDBConnector::Escape(const std::wstring& wvalue)
-{
-	return Escape(wvalue.c_str());
-}
-
-int CDBConnector::GetMySQLError()
-{
-	if (_conn)
-	{
-		return mysql_errno(_conn);
-	}
-	else
-	{
-		return 0;
-	}
+	return std::string(_escapeBuffer.data(), len);
 }
 
 bool CDBConnector::KeepAlive()
 {
+	if (_conn == nullptr)
+	{
+		Reconnect();
+		
+		if (!_isRunning)
+			return false;
+	}
+
 	if (mysql_ping(_conn) != 0)
 	{
-		if (inTransaction)
+		if (_inTransaction)
 		{
-			lastError = EDBError::DISCONNECTED_DURING_TRANSACTION;
+			_lastError = EDBError::DISCONNECTED_DURING_TRANSACTION;
 			return false;
 		}
 
-		int cnt = 0;
-		while (!RawConnect())
-		{
-			if (cnt == _config.reconnectCnt)
-			{
-				lastError = EDBError::QUERY_FAILED;
-				return false;
-			}
+		Reconnect();
 
-			cnt++;
-		}
+		if (!_isRunning)
+			return false;
 
 		SLOG(JDBLog::DB, L"Connection restored");
 	}
@@ -282,30 +326,7 @@ bool CDBConnector::KeepAlive()
 	return true;
 }
 
-bool CDBConnector::RawConnect()
-{
-	if (_conn)
-	{
-		mysql_close(_conn);
-	}
-
-	_conn = mysql_init(NULL);
-
-	if (!mysql_real_connect(_conn, _config.host.c_str(), _config.user.c_str(), 
-			_config.pw.c_str(), _config.db.c_str(), _config.port, NULL, 0))
-	{
-		lastError = EDBError::CONNECTION_FAILED;
-		return false;
-	}
-
-	mysql_set_character_set(_conn, "utf8mb4");
-
-	lastError = EDBError::NONE;
-
-	return true;
-}
-
-bool CDBConnector::ExecuteRaw(const char* sql)
+bool CDBConnector::Execute(const char* sql)
 {
 	if (!KeepAlive())
 	{
@@ -314,7 +335,7 @@ bool CDBConnector::ExecuteRaw(const char* sql)
 
 	if (mysql_query(_conn, sql) != 0)
 	{
-		lastError = EDBError::QUERY_FAILED;
+		HandleMySQLError(mysql_errno(_conn));
 		return false;
 	}
 
@@ -332,63 +353,45 @@ bool CDBConnector::FormatStringW(char* dest, size_t destLen, const wchar_t* form
 
 	if (size < 0 || (size_t)size >= MAX_QUERY_LEN)
 	{
-		lastError = EDBError::QUERY_BUFFER_OVERFLOW;
+		_lastError = EDBError::QUERY_BUFFER_OVERFLOW;
 		return false;
 	}
 
-	if (WStringToUTF8(wLocalBuffer, dest, (int)destLen) == 0)
+	if (StringUtil::WStringToUTF8(wLocalBuffer, dest, (int)destLen) == 0)
 	{
+		_lastError = EDBError::UTF8_ENCODING_FAILED;
 		return false;
 	}
 
 	return true;
 }
 
-int CDBConnector::WStringToUTF8(const wchar_t* wstr, char* dest, int destLen)
-{
-	if (!wstr || !dest || destLen <= 0) 
-		return 0;
-	
-	int utf8Size = WideCharToMultiByte(CP_UTF8, 0, wstr, -1, dest, destLen, NULL, NULL);
-
-	if (utf8Size == 0)
-	{
-		DWORD error = ::GetLastError();
-		if (error == ERROR_INSUFFICIENT_BUFFER)
-		{
-			lastError = EDBError::QUERY_BUFFER_OVERFLOW;
-		}
-		else
-		{
-			lastError = EDBError::UTF8_ENCODING_FAILED;
-		}
-		return 0;
-	}
-
-	return utf8Size;
-}
-
 void CDBConnector::HandleMySQLError(int errCode)
 {
 	if (errCode == 2006 || errCode == 2013)
 	{
-		lastError = EDBError::CONNECTION_LOST;
-		SLOG(JDBLog::DB, L"Network link failure detected: %d", errCode);
+		_lastError = EDBError::CONNECTION_LOST;
+		ELOG(JDBLog::DB, L"Network link failure detected: %d", errCode);
 	}
 	else if (errCode == 1146)
 	{
-		lastError = EDBError::TABLE_NOT_FOUND;
-		SLOG(JDBLog::DB, L"Table not found: %S", mysql_error(_conn));
+		_lastError = EDBError::TABLE_NOT_FOUND;
+		ELOG(JDBLog::DB, L"Table not found: %S", mysql_error(_conn));
 	}
 	else if (errCode == 1064)
 	{
-		lastError = EDBError::SYNTAX_ERROR;
-		SLOG(JDBLog::DB, L"SQL Syntax Error: %S", mysql_error(_conn));
+		_lastError = EDBError::SYNTAX_ERROR;
+		ELOG(JDBLog::DB, L"SQL Syntax Error: %S", mysql_error(_conn));
+	}
+	else if (errCode == 1062)
+	{
+		_lastError = EDBError::DUPLICATE_KEY;
+		ELOG(JDBLog::DB, L"SQL Insert Error: %S", mysql_error(_conn));
 	}
 	else
 	{
-		lastError = EDBError::QUERY_FAILED;
-		SLOG(JDBLog::DB, L"MySQL Error (%d): %S", errCode, mysql_error(_conn));
+		_lastError = EDBError::QUERY_FAILED;
+		ELOG(JDBLog::DB, L"MySQL Error (%d): %S", errCode, mysql_error(_conn));
 	}
 }
 

@@ -4,10 +4,13 @@
 #include <vector>
 #include <memory>
 #include <sstream>
+#include <string_view>
+#include <unordered_map>
 #include <JCore/JWindows.h>
-#include <mysql/mysql.h>
-#pragma comment(lib, "libmysql.lib")
-#include <JCore/SLog.h>
+#include <JCore/StringUtility.h>
+
+struct MYSQL_RES;
+struct MYSQL;
 
 struct FDBConfig
 {
@@ -16,7 +19,6 @@ struct FDBConfig
 	std::string pw;
 	std::string db;
 	int port = 3306;
-	int reconnectCnt = 3;
 };
 
 enum class EDBError
@@ -25,6 +27,7 @@ enum class EDBError
 	CONNECTION_FAILED,
 	CONNECTION_LOST,
 	SYNTAX_ERROR,
+	DUPLICATE_KEY,
 	QUERY_FAILED,
 	UTF8_ENCODING_FAILED,
 	TRANSACTION_ALREADY_STARTED,
@@ -36,7 +39,7 @@ enum class EDBError
 
 class CResultSet
 {
-	std::map<std::string, int> columnIdxMap;
+	std::map<std::string, int, std::less<>> columnIdxMap;
 	std::vector<std::vector<std::string>> data;
 	int currentRow = -1;
 	bool isValid = false;
@@ -52,63 +55,74 @@ public:
     CResultSet(const CResultSet&) = delete;
     CResultSet& operator=(const CResultSet&) = delete;
 
-	bool Next() { return ++currentRow < (int)data.size(); }
+	bool Next() 
+	{ 
+		if (currentRow < (int)data.size())
+		{
+			currentRow++;
+			return true;
+		}
+
+		return false;
+	}
+
+	int GetRows() { return (int)data.size(); };
 
 	bool IsValid() { return isValid; }
 
 	bool IsEmpty() { return data.empty(); }
 
-private:
-	template <typename T>
-	T GetValue(const std::string& name)
-	{
+public:
+	int GetInt(std::string_view name) 
+	{ 
 		auto it = columnIdxMap.find(name);
 		if (it == columnIdxMap.end() || currentRow < 0 || currentRow >= (int)data.size()) 
-			return T();
+			return 0;
 
 		const std::string& valStr = data[currentRow][it->second];
-
-		std::stringstream ss(valStr);
-		T val; 
-		if (!(ss >> val))
-		{
-			return T();
-		}
-
-		return val;
+		return atoi(valStr.c_str()); 
 	}
 
-	// string 특화
-	template <>
-	inline std::string GetValue<std::string>(const std::string& name)
-	{
-		if (columnIdxMap.find(name) == columnIdxMap.end()) return "";
-		return data[currentRow][columnIdxMap[name]];
+	double GetDouble(std::string_view name) 
+	{ 
+		auto it = columnIdxMap.find(name);
+		if (it == columnIdxMap.end() || currentRow < 0 || currentRow >= (int)data.size()) 
+			return 0;
+
+		const std::string& valStr = data[currentRow][it->second];
+		return atof(valStr.c_str()); 
 	}
 
-public:
-	// 타입별 추출 함수
-	int GetInt(const std::string& name) { return GetValue<int>(name); }
-	double GetDouble(const std::string& name) { return GetValue<double>(name); }
-	std::string GetString(const std::string& name) { return GetValue<std::string>(name); }
+	std::wstring GetString(std::string_view name) 
+	{ 
+		auto it = columnIdxMap.find(name);
+		if (it == columnIdxMap.end() || currentRow < 0 || currentRow >= (int)data.size()) 
+			return L"";
+
+		return StringUtil::StringToWString(data[currentRow][it->second]);
+	}
 };
 
 
 class CDBConnector
 {
-	MYSQL* _conn;
-	EDBError lastError = EDBError::NONE;
-	bool inTransaction = false;
-	FDBConfig _config;
-
+public:
 	static const size_t MAX_QUERY_LEN = 4096;
 
 public:
+	static void Initialize();
+	static void Release();
+
 	CDBConnector(const FDBConfig& config);
 	~CDBConnector();
 
-	EDBError GetLastError() const { return lastError; }
+	void Enable();
+	void Disable();
+
+	EDBError GetLastError() const { return _lastError; }
+	int GetMySqlError() const;
 	bool Connect();
+	void Reconnect();
 	void Disconnect();
 
 	// --- 트랜잭션 관리 ---
@@ -123,18 +137,20 @@ public:
 	long long WriteQuery(const wchar_t* format, ...);
 
 	bool IsConnected();
-	std::string Escape(const wchar_t* wvalue);
-	std::string Escape(const std::wstring& wvalue);
-
-	int GetMySQLError();
+	std::string Escape(std::wstring_view wvalue);
 
 private:
 	bool KeepAlive();
-	bool RawConnect();
-	bool ExecuteRaw(const char* sql);
-
+	bool Execute(const char* sql);
 	bool FormatStringW(char* dest, size_t destLen, const wchar_t* format, va_list args);
-	int WStringToUTF8(const wchar_t* wstr, char* dest, int destLen);
-
 	void HandleMySQLError(int errCode);
+
+private:
+	MYSQL* _conn;
+	EDBError _lastError = EDBError::NONE;
+	bool _isRunning = false;
+	bool _inTransaction = false;
+	std::vector<char> _escapeBuffer;
+	FDBConfig _config;
+
 };

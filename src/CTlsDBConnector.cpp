@@ -16,6 +16,27 @@ CTlsDBConnector::~CTlsDBConnector()
 	TlsFree(_index);
 }
 
+void CTlsDBConnector::Enable()
+{
+	CDBConnector* connector = (CDBConnector*)TlsGetValue(_index);
+	if (connector == nullptr)
+	{
+		connector = Init();
+	}
+
+	return connector->Enable(); 
+}
+
+void CTlsDBConnector::DisableAll()
+{ 
+	CRGuard guard(&_lock);
+
+	for (auto iter : _container)
+	{
+		iter->Disable();
+	}
+}
+
 EDBError CTlsDBConnector::GetLastError()
 { 
 	CDBConnector* connector = (CDBConnector*)TlsGetValue(_index);
@@ -36,6 +57,17 @@ bool CTlsDBConnector::Connect()
 	}
 
 	return connector->Connect();
+}
+
+void CTlsDBConnector::Reconnect()
+{
+	CDBConnector* connector = (CDBConnector*)TlsGetValue(_index);
+	if (connector == nullptr)
+	{
+		connector = Init();
+	}
+
+	connector->Reconnect();
 }
 
 void CTlsDBConnector::Disconnect()
@@ -127,7 +159,7 @@ bool CTlsDBConnector::IsConnected()
 	return connector->IsConnected();
 }
 
-std::string CTlsDBConnector::Escape(const wchar_t* wvalue)
+void CTlsDBConnector::PushTaskSync(IDBTask* task)
 {
 	CDBConnector* connector = (CDBConnector*)TlsGetValue(_index);
 	if (connector == nullptr)
@@ -135,23 +167,42 @@ std::string CTlsDBConnector::Escape(const wchar_t* wvalue)
 		connector = Init();
 	}
 
-	return connector->Escape(wvalue);
+	return task->Execute(connector);
 }
 
-std::string CTlsDBConnector::Escape(const std::wstring& wvalue)
-{
-	CDBConnector* connector = (CDBConnector*)TlsGetValue(_index);
-	if (connector == nullptr)
-	{
-		connector = Init();
-	}
-
-	return connector->Escape(wvalue.c_str());
-}
 
 CDBConnector* CTlsDBConnector::Init()
 {
+	class CDBDeleter : public IThreadObserver
+	{
+	public:
+		CDBDeleter(CTlsDBConnector* parent, CDBConnector* ptr, unsigned int index)
+			: _parent(parent)
+			, _ptr(ptr)
+			, _index(index)
+		{
+		}
+
+		void OnThreadExit() override
+		{
+			{
+				CWGuard guard(&_parent->_lock);
+				_parent->_container.erase(_ptr);
+			}
+			delete _ptr;
+			TlsSetValue(_index, nullptr);
+		}
+
+		CTlsDBConnector* _parent; 
+		CDBConnector* _ptr; 
+		unsigned int _index;
+	};
+
 	CDBConnector* connector = new CDBConnector(_config);
+	{
+		CWGuard guard(&_lock);
+		_container.insert(connector);
+	}
 	CThread::GetContextPtr()->AddObserver(Context::MakeObserver<CDeleteObserver<CDBConnector>>(connector, _index));
 	TlsSetValue(_index, connector);
 	return connector;

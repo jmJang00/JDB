@@ -1,25 +1,27 @@
 #pragma once
+#include <set>
 #include <JCore/CThread.h>
+#include <JCore/ScopedLock.h>
 #include <JDB/CDBConnector.h>
+#include <JDB/IDBTask.h>
 
 class CTlsDBConnector
 {
-private:
-	unsigned int _index;
-	FDBConfig _config;
-
 public:
 	CTlsDBConnector(const FDBConfig& config);
 	~CTlsDBConnector();
 
+	void Enable();
+	void DisableAll();
+
 	EDBError GetLastError();
 	bool Connect();
+	void Reconnect();
 	void Disconnect();
 
 	// --- 飘罚黎记 包府 ---
 	bool BeginTransaction();
 	bool Commit();
-
 	bool Rollback();
 
 	// --- 孽府 棺 角青 ---
@@ -27,10 +29,14 @@ public:
 	long long WriteQuery(const wchar_t* format, ...);
 	bool IsConnected();
 
-	std::string Escape(const wchar_t* wvalue);
-	std::string Escape(const std::wstring& wvalue);
+	void PushTaskSync(IDBTask* task);
 
 private:
-
 	CDBConnector* Init();
+
+private:
+	std::set<CDBConnector*> _container;
+	CRWLock _lock;
+	unsigned int _index;
+	FDBConfig _config;
 };

@@ -1,11 +1,11 @@
 #include "pch.h"
 #include <JDB/CDBAgent.h>
+#include <JDB/CDBQueue.h>
 #include "LogTag.h"
 
-CDBAgent::CDBAgent()
-	: _writeQueue(10000)
+CDBAgent::CDBAgent(const FDBConfig& config)
 {
-
+	_dbConfig = config;
 }
 
 CDBAgent::~CDBAgent()
@@ -13,15 +13,20 @@ CDBAgent::~CDBAgent()
 	Release(); 
 }
 
-bool CDBAgent::Initialize(int readThreadCount, const FDBConfig& config)
+bool CDBAgent::Initialize(int numChannel, int numThread, int queueSize, const std::vector<IWorkerObserver*>& observers)
 {
 	if (_isRunning)
 	{
 		return false;
 	}
 
-	_dbConfig = config;
 	_isRunning = true;
+	_numChannel = numChannel;
+	_observers = observers;
+	for (int i = 0; i < observers.size(); ++i)
+	{
+		_observers.push_back(observers[i]->Clone());
+	}
 
 	_readIocp = CreateIoCompletionPort(INVALID_HANDLE_VALUE, NULL, 0, 0);
 
@@ -30,17 +35,18 @@ bool CDBAgent::Initialize(int readThreadCount, const FDBConfig& config)
 		return false;
 	}
 
-	_writeEvent = CreateEvent(nullptr, false, false, nullptr);
-	_writeShutdownEvent = CreateEvent(nullptr, false, false, nullptr);
-
-	for (int i = 0; i < readThreadCount; ++i)
+	for (int i = 0; i < numChannel; ++i)
 	{
-		_readThreads.push_back(new CThread([this]() { this->ReadWorkerThread(); }));
-		_readThreads.back()->Create();
+		_dbQueues.push_back(new CDBQueue(queueSize, this));
 	}
 
-	_writeThread = new CThread([this]() { this->WriteWorkerThread(); });
-	_writeThread->Create();
+	for (int i = 0; i < numThread; ++i)
+	{
+		auto connector = new CDBConnector(_dbConfig);
+		_connectors.push_back(connector);
+		_threads.push_back(new CThread([this, connector]() { DBWorkerThread(connector); }));
+		_threads.back()->Create();
+	}
 
 	return true;
 }
@@ -54,21 +60,21 @@ void CDBAgent::Release()
 
 	_isRunning = false;
 
-	for (size_t i = 0; i < _readThreads.size(); ++i)
+	for (size_t i = 0; i < _threads.size(); ++i)
 	{
 		PostQueuedCompletionStatus(_readIocp, 0, 0, nullptr);
 	}
 
-	SetEvent(_writeShutdownEvent);
+	for (int i = 0; i < _connectors.size(); i++)
+	{
+		_connectors[i]->Disable();
+	}
 
-	for (auto& t : _readThreads)
+	for (auto& t : _threads)
 	{
 		t->Wait();
 		t->Close();
 	}
-
-	_writeThread->Wait();
-	_writeThread->Close();
 
 	if (_readIocp) 
 	{ 
@@ -76,19 +82,7 @@ void CDBAgent::Release()
 		_readIocp = nullptr; 
 	}
 
-	if (_writeEvent) 
-	{ 
-		CloseHandle(_writeEvent); 
-		_writeEvent = nullptr; 
-	}
-
-	if (_writeShutdownEvent) 
-	{ 
-		CloseHandle(_writeShutdownEvent); 
-		_writeShutdownEvent = nullptr; 
-	}
-
-	for (auto& t : _readThreads)
+	for (auto& t : _threads)
 	{
 		if (t != nullptr)
 		{
@@ -96,54 +90,72 @@ void CDBAgent::Release()
 			t = nullptr;
 		}
 	}
+	_threads.clear();
 
-	if (_writeThread != nullptr)
+	for (auto& q : _dbQueues)
 	{
-		delete _writeThread;
-		_writeThread = nullptr;
+		if (q != nullptr)
+		{
+			delete q;
+			q = nullptr;
+		}
+	}
+	_dbQueues.clear();
+
+	for (int i = 0; i < _connectors.size(); i++)
+	{
+		delete _connectors[i];
 	}
 
-	_readThreads.clear();
-}
+	_connectors.clear();
 
-void CDBAgent::PushReadTask(IDBTask* task)
-{
-	PostQueuedCompletionStatus(_readIocp, 0, (ULONG_PTR)task, nullptr);
-}
-
-void CDBAgent::PushWriteTask(IDBTask* task)
-{
-	_writeQueue.Enqueue(task);
-	SetEvent(_writeEvent);
-}
-
-void CDBAgent::RequestWriteSync(IDBTask* task)
-{
-	auto promise = std::make_shared<std::promise<void>>();
-	auto future = promise->get_future();
-
-	PushWriteTask(CreateTask<SyncTaskWrapper>(task, promise));
-
-	future.get();
-}
-
-void CDBAgent::RequestReadSync(IDBTask* task)
-{
-	auto promise = std::make_shared<std::promise<void>>();
-	auto future = promise->get_future();
-
-	PushReadTask(CreateTask<SyncTaskWrapper>(task, promise));
-
-	future.get();
-}
-
-void CDBAgent::ReadWorkerThread()
-{
-	CDBConnector _conn(_dbConfig);
-
-	if (!_conn.Connect())
+	for (int i = 0; i < _observers.size(); i++)
 	{
+		delete _observers[i];
+	}
+	_observers.clear();
+}
+
+int CDBAgent::GetUseSize(int channel)
+{
+	if (channel < 0 || channel >= _numChannel)
+		return 0;
+
+	_dbQueues[channel]->GetUseSize();
+}
+
+bool CDBAgent::PostStatus(uintptr_t compKey)
+{
+	return PostQueuedCompletionStatus(_readIocp, 0, (ULONG_PTR)compKey, nullptr);
+}
+
+void CDBAgent::PushTask(int channel, IDBTask* task)
+{
+	if (channel < 0 || channel >= _numChannel)
 		return;
+
+	_dbQueues[channel]->PostTask(task);
+}
+
+void CDBAgent::PushTaskSync(int channel, IDBTask* task)
+{
+	auto promise = std::make_shared<std::promise<void>>();
+	auto future = promise->get_future();
+
+	SyncTaskWrapper wrapper(task, promise);
+
+	PushTask(channel, &wrapper);
+
+	future.get();
+}
+
+void CDBAgent::DBWorkerThread(CDBConnector* connector)
+{
+	connector->Enable();
+	connector->Reconnect();
+	for (auto observer : _observers)
+	{
+		observer->OnWorkerEnter();
 	}
 
 	while (_isRunning)
@@ -152,6 +164,10 @@ void CDBAgent::ReadWorkerThread()
 		ULONG_PTR completionKey = 0;
 		LPOVERLAPPED overlapped = nullptr;
 
+		for (auto observer : _observers)
+		{
+			observer->OnWorkerEnd();
+		}
 		GetQueuedCompletionStatus(_readIocp, &bytesTransferred, &completionKey, &overlapped, INFINITE);
 
 		IDBTask* task = reinterpret_cast<IDBTask*>(completionKey);
@@ -160,40 +176,13 @@ void CDBAgent::ReadWorkerThread()
 			break;
 		}
 
-		task->Execute(&_conn);
-
-		FreeTask(task);
+		CDBQueue* queue = (CDBQueue*)completionKey;
+		queue->Execute(connector);
 	}
 
-	_conn.Disconnect();
-}
-
-void CDBAgent::WriteWorkerThread()
-{
-	CDBConnector _conn(_dbConfig);
-	while (!_conn.Connect())
+	connector->Disconnect();
+	for (auto observer : _observers)
 	{
-		ELOG(JDBLog::DB, L"DB Connect Fail %S:%d", _dbConfig.host.c_str(), _dbConfig.port);
-		Sleep(1000);
+		observer->OnWorkerExit();
 	}
-
-	HANDLE handles[] = { _writeShutdownEvent, _writeEvent };
-
-	IDBTask* task = nullptr;
-	while (_isRunning)
-	{
-		DWORD ret = WaitForMultipleObjects(2, handles, false, INFINITE);
-		if (ret == WAIT_OBJECT_0)
-		{
-			break;
-		}
-
-		while (_writeQueue.Dequeue(&task))
-		{
-			task->Execute(&_conn);
-			FreeTask(task);
-		}
-	}
-
-	_conn.Disconnect();
 }

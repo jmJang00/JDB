@@ -1,8 +1,9 @@
 #include "pch.h"
 #include <stdexcept>
 #include <JDB/CTlsRedisConnector.h>
+#include <JCore/CThread.h>
 
-CTlsRedisConnector::CTlsRedisConnector(const FRedisConfig& config, int timeoutSec)
+CTlsRedisConnector::CTlsRedisConnector(const FRedisConfig& config)
 	: _config(config)
 {
 	_index = TlsAlloc();
@@ -10,12 +11,32 @@ CTlsRedisConnector::CTlsRedisConnector(const FRedisConfig& config, int timeoutSe
 	{
 		throw std::runtime_error("CTlsRedisConnector::CTlsRedisConnector(): tls out of indexes");
 	}
-	_timeoutSec = timeoutSec;
 }
 
 CTlsRedisConnector::~CTlsRedisConnector()
 {
 	TlsFree(_index);
+}
+
+void CTlsRedisConnector::Enable()
+{
+	CRedisConnector* connector = (CRedisConnector*)TlsGetValue(_index);
+	if (connector == nullptr)
+	{
+		connector = Init();
+	}
+
+	connector->Enable();
+}
+
+void CTlsRedisConnector::DisableAll()
+{
+	CRGuard guard(&_lock);
+
+	for (auto iter : _container)
+	{
+		iter->Disable();
+	}
 }
 
 bool CTlsRedisConnector::Connect()
@@ -27,6 +48,17 @@ bool CTlsRedisConnector::Connect()
 	}
 
 	return connector->Connect();
+}
+
+void CTlsRedisConnector::Reconnect()
+{
+	CRedisConnector* connector = (CRedisConnector*)TlsGetValue(_index);
+	if (connector == nullptr)
+	{
+		connector = Init();
+	}
+
+	connector->Reconnect();
 }
 
 void CTlsRedisConnector::Disconnect()
@@ -73,6 +105,17 @@ std::string CTlsRedisConnector::Get(const std::string& key)
 	return connector->Get(key);
 }
 
+bool CTlsRedisConnector::Delete(const std::string& key)
+{
+	CRedisConnector* connector = (CRedisConnector*)TlsGetValue(_index);
+	if (connector == nullptr)
+	{
+		connector = Init();
+	}
+
+	return connector->Delete(key);
+}
+
 ERedisError CTlsRedisConnector::GetLastError()
 {
 	CRedisConnector* connector = (CRedisConnector*)TlsGetValue(_index);
@@ -86,8 +129,37 @@ ERedisError CTlsRedisConnector::GetLastError()
 
 CRedisConnector* CTlsRedisConnector::Init()
 {
-	CRedisConnector* connector = new CRedisConnector(_config, _timeoutSec);
-	CThread::GetContextPtr()->AddObserver(Context::MakeObserver<CDeleteObserver<CRedisConnector>>(connector, _index));
+	class CRedisDeleter : public IThreadObserver
+	{
+	public:
+		CRedisDeleter(CTlsRedisConnector* parent, CRedisConnector* ptr, unsigned int index)
+			: _parent(parent)
+			, _ptr(ptr)
+			, _index(index)
+		{
+		}
+
+		void OnThreadExit() override
+		{
+			{
+				CWGuard guard(&_parent->_lock);
+				_parent->_container.erase(_ptr);
+			}
+			delete _ptr;
+			TlsSetValue(_index, nullptr);
+		}
+
+		CTlsRedisConnector* _parent; 
+		CRedisConnector* _ptr; 
+		unsigned int _index;
+	};
+
+	CRedisConnector* connector = new CRedisConnector(_config);
+	{
+		CWGuard guard(&_lock);
+		_container.insert(connector);
+	}
+	CThread::GetContextPtr()->AddObserver(Context::MakeObserver<CRedisDeleter>(this, connector, _index));
 	TlsSetValue(_index, connector);
 	return connector;
 }
